@@ -1,0 +1,212 @@
+---
+title: "Pêche de loisir en `r params$region`"
+subtitle: "Rapport automatique - panel 2025 (données fictives)"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+params:
+  region: "Bretagne"   # la région du rapport : change-la ici, ou depuis analyse.R
+  bayes: TRUE          # TRUE = faire le modèle bayésien (nécessite le package rstanarm)
+---
+
+```{css, echo = FALSE}
+h1.title, h3.subtitle, h4.date { text-align: center; }
+```
+
+```{r setup, include = FALSE}
+# Options pour tous les chunks : on cache le code et les messages
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 4.5)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+# On charge la base PROPRE (créée par analyse.R)
+toutes <- read.csv("/Users/yann/Downloads/panel_peche.csv")
+
+# On garde seulement la région du rapport
+peche <- filter(toutes, region == params$region)
+
+# Noms des mois en français, dans le bon ordre
+mois_noms <- c("janv.", "févr.", "mars", "avr.", "mai", "juin",
+               "juil.", "août", "sept.", "oct.", "nov.", "déc.")
+peche$mois_nom <- factor(mois_noms[peche$mois], levels = mois_noms)
+
+# Quelques chiffres utilisés dans le texte
+nb_sorties   <- nrow(peche)
+nb_pecheurs  <- n_distinct(peche$id_pecheur)
+total_gardes <- sum(peche$nb_captures)
+total_relach <- sum(peche$nb_relaches)
+taux_relache <- round(100 * total_relach / (total_gardes + total_relach))
+espece_top   <- peche %>% count(espece, wt = nb_captures, sort = TRUE) %>% slice(1)
+```
+
+# Résumé
+
+En `r params$region`, le panel a suivi **`r nb_pecheurs` pêcheurs** pour **`r nb_sorties` sorties** en 2025. Ils ont gardé **`r total_gardes` poissons** et en ont relâché **`r total_relach`**, soit un taux de relâche de **`r taux_relache` %**. L'espèce la plus gardée est **`r espece_top$espece`** (`r espece_top$n` poissons).
+
+# Chiffres clés
+
+```{r}
+chiffres <- data.frame(
+  Indicateur = c("Pêcheurs suivis", "Sorties", "Durée moyenne d'une sortie (h)",
+                 "Poissons gardés", "Poissons relâchés", "Taux de relâche (%)",
+                 "Poids total gardé (kg)", "Poissons gardés par sortie (moyenne)"),
+  Valeur = as.character(c(nb_pecheurs, nb_sorties, round(mean(peche$duree_h), 1),
+             total_gardes, total_relach, taux_relache,
+             round(sum(peche$poids_kg)), round(mean(peche$nb_captures), 1)))
+)
+kable(chiffres)
+```
+
+# Les sorties de pêche
+
+## Au fil de l'année
+
+```{r}
+ggplot(peche, aes(x = mois_nom)) +
+  geom_bar(fill = "steelblue") +
+  scale_x_discrete(drop = FALSE) +          # garde aussi les mois sans sortie
+  labs(title = "Nombre de sorties par mois", x = NULL, y = "Sorties") +
+  theme_minimal()
+```
+
+## Par type de pêche
+
+```{r}
+peche %>%
+  group_by(type_peche) %>%
+  summarise(Sorties = n(),
+            `Durée moyenne (h)` = round(mean(duree_h), 1),
+            `Gardés par sortie` = round(mean(nb_captures), 1)) %>%
+  arrange(desc(Sorties)) %>%
+  rename(`Type de pêche` = type_peche) %>%
+  kable()
+```
+
+# Les espèces
+
+```{r}
+especes <- peche %>%
+  group_by(espece) %>%
+  summarise(sorties = n(),
+            gardes = sum(nb_captures),
+            relaches = sum(nb_relaches),
+            poids = round(sum(poids_kg), 1)) %>%
+  mutate(taux = round(100 * relaches / (gardes + relaches))) %>%
+  arrange(desc(gardes))
+
+# col.names = les titres affichés dans le tableau
+kable(especes, col.names = c("Espèce", "Sorties", "Gardés", "Relâchés",
+                             "Poids gardé (kg)", "Taux de relâche (%)"))
+```
+
+```{r}
+# On passe au format long pour avoir deux barres par espèce
+especes_long <- especes %>%
+  select(espece, gardes, relaches) %>%
+  pivot_longer(cols = c(gardes, relaches), names_to = "devenir", values_to = "poissons")
+
+ggplot(especes_long, aes(x = reorder(espece, -poissons), y = poissons, fill = devenir)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("gardes" = "steelblue", "relaches" = "darkorange"),
+                    labels = c("gardes" = "Gardés", "relaches" = "Relâchés"),
+                    name = NULL) +
+  labs(title = "Poissons gardés et relâchés par espèce", x = NULL, y = "Nombre de poissons") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+# L'effet de la météo
+
+```{r}
+ggplot(peche, aes(x = meteo, y = nb_captures, fill = meteo)) +
+  geom_boxplot() +
+  labs(title = "Poissons gardés par sortie selon la météo", x = NULL, y = "Poissons gardés") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+peche %>%
+  group_by(meteo) %>%
+  summarise(Sorties = n(), `Gardés par sortie (moyenne)` = round(mean(nb_captures), 1)) %>%
+  rename(Météo = meteo) %>%
+  kable()
+```
+
+# Comparaison avec les autres régions
+
+```{r}
+par_region <- toutes %>%
+  group_by(region) %>%
+  summarise(gardes_par_sortie = mean(nb_captures)) %>%
+  mutate(cette_region = region == params$region)
+
+ggplot(par_region, aes(x = reorder(region, gardes_par_sortie), y = gardes_par_sortie,
+                       fill = cette_region)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "grey75")) +
+  labs(title = "Poissons gardés par sortie, toutes régions",
+       subtitle = paste("En bleu :", params$region), x = NULL, y = "Moyenne par sortie") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+# Modèle bayésien
+
+```{r}
+# Le modèle ne tourne que si bayes = TRUE et que rstanarm est installé
+faire_modele <- params$bayes && requireNamespace("rstanarm", quietly = TRUE)
+```
+
+```{r, results = "asis", eval = !faire_modele}
+cat("*Modèle non calculé : installe le package rstanarm avec `install.packages(\"rstanarm\")`, ou mets `bayes: TRUE` dans l'en-tête.*")
+```
+
+```{r modele, eval = faire_modele}
+library(rstanarm)
+
+# Nombre de poissons gardés par sortie, expliqué par la météo, la saison et la durée
+modele <- stan_glm(nb_captures ~ meteo + saison + duree_h,
+                   data = peche,
+                   family = neg_binomial_2(),   # nombres comptés, avec beaucoup de zéros
+                   chains = 2, iter = 1000,     # calcul court pour un rapport
+                   refresh = 0,                 # n'affiche pas l'avancement du calcul
+                   seed = 123)
+
+# Les effets sont sur une échelle logarithmique : exp() les transforme en
+# "multiplié par". Exemple : 0,6 veut dire 0,6 fois moins de poissons (40 % de moins).
+effets <- data.frame(
+  Variable = names(coef(modele)),
+  `Effet (multiplié par)` = round(exp(coef(modele)), 2),
+  `Minimum probable` = round(exp(posterior_interval(modele, prob = 0.95)[names(coef(modele)), 1]), 2),
+  `Maximum probable` = round(exp(posterior_interval(modele, prob = 0.95)[names(coef(modele)), 2]), 2),
+  check.names = FALSE
+)
+effets <- filter(effets, Variable != "(Intercept)")
+kable(effets, row.names = FALSE,
+      caption = "Effet de chaque variable sur le nombre de poissons gardés (intervalle à 95 %)")
+```
+
+```{r, results = "asis", eval = faire_modele}
+tirages <- as.data.frame(modele)
+if ("meteopluie" %in% names(tirages)) {
+  proba <- round(100 * mean(tirages$meteopluie < 0))
+  cat("**Lecture :** il y a **", proba, " %** de probabilité qu'on garde moins de poissons ",
+      "par temps de pluie que par beau temps, à saison et durée égales.\n\n", sep = "")
+}
+cat("Comparaison de référence : beau temps et saison automne (premières par ordre alphabétique). ",
+    "Un effet au-dessus de 1 veut dire plus de poissons, en dessous de 1 moins de poissons. ",
+    "Si l'intervalle (minimum - maximum probable) contient 1, l'effet n'est pas net.\n", sep = "")
+```
+
+---
+
+*Données fictives générées pour s'entraîner. Rapport produit automatiquement avec R Markdown.*
